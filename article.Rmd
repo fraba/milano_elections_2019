@@ -1,0 +1,1061 @@
+---
+title: "Il voto per le europee a Milano"
+author: "Francesco Bailo"
+date: "06/06/2019"
+output: 
+  html_document: 
+    self_contained: no
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+```
+
+```{r libraries}
+library(ggplot2)
+library(sf)
+library(osmdata)
+library(lwgeom)
+library(viridis)
+library(scales)
+library(gridExtra)
+library(readxl)
+library(stringr)
+library(sp)
+library(dplyr)
+library(readr)
+library(lm.beta)
+library(knitr)
+```
+
+```{r prepare-electoral-census}
+sezioni_civico <-
+  read.csv("data/20190526_Str.csv", sep=";")
+civico_lonlat <-
+  read.csv("data/ds634_civici_coordinategeografiche_20190508.csv", sep=";")
+
+sezioni_civico$CodVia_num <-
+  as.numeric(gsub(",00", "", as.character(sezioni_civico$CodVia)))
+sezioni_civico$Civico_num <-
+  as.numeric(gsub(",00", "", as.character(sezioni_civico$Civico)))
+sezioni_civico$Sezione_num <-
+  as.numeric(gsub(",00", "", as.character(sezioni_civico$Sezione)))
+
+civico_lonlat$CodVia_num <-
+  as.numeric(civico_lonlat$CODICE_VIA)
+civico_lonlat$Civico_num <-
+  as.numeric(civico_lonlat$NUMERO)
+
+civico_lonlat <-
+  civico_lonlat %>%
+  group_by(CodVia_num, Civico_num) %>%
+  summarize(LONG_WGS84 = mean(LONG_WGS84), 
+            LAT_WGS84 = mean(LAT_WGS84))
+
+sezioni_civico <-
+  sezioni_civico %>%
+  select(CodVia_num, Civico_num, Sezione_num) %>%
+  distinct()
+# sum(duplicated(sezioni_civico[,1:2]))
+# 8
+sezioni_civico <-
+  sezioni_civico[!duplicated(sezioni_civico[,1:2]),]
+
+sezioni_civico <-
+  merge(sezioni_civico, civico_lonlat, by = c("CodVia_num","Civico_num"), all.x = T)
+# sum(is.na(sezioni_civico$LONG_WGS84))
+
+sezioni_voti <-
+  read.csv("data/20190526_Voti_E1.csv", sep=";")
+
+# sum(!sezioni_civico$Sezione_num %in% sezioni_voti$Sezione)
+# sum(!sezioni_voti$Sezione %in% sezioni_civico$Sezione_num)
+
+sezioni_civico.sf <-
+  st_as_sf(sezioni_civico[!is.na(sezioni_civico$LONG_WGS84),], 
+           coords = c("LONG_WGS84", "LAT_WGS84"), 
+           crs = 4326)
+
+# Intersect censimento
+
+census_sections.sf <- 
+  read_sf('data/census_shp/R03_11_WGS84.shp')
+census_sections.sf <-
+  census_sections.sf[census_sections.sf$PRO_COM == 15146,] 
+
+R03_indicatori_2011_sezioni <- 
+  read_delim("data/R03_indicatori_2011_sezioni.csv", 
+             ";", escape_double = FALSE, trim_ws = TRUE)
+
+census_sections.sf <-
+  merge(census_sections.sf, R03_indicatori_2011_sezioni,
+        by = 'SEZ2011', all.x = TRUE)
+
+census_sections.sf$pop2011 <- 
+  census_sections.sf$P1
+
+census_sections.sf$unempl_pct <- 
+  census_sections.sf$P62 / census_sections.sf$P60
+
+census_sections.sf$over65_pct <- 
+  with(census_sections.sf, (P27 + P28 + P29) / P1)
+
+census_sections.sf$degree_pct <- 
+  with(census_sections.sf, (P47) / P1)
+
+census_sections.sf$africa_pct <- 
+  with(census_sections.sf, (ST10) / P1)
+
+census_sections.sf$asia_pct <- 
+  with(census_sections.sf, (ST12) / P1)
+
+res <-
+  over(as(st_transform(sezioni_civico.sf, 32632), "Spatial"),
+       as(census_sections.sf, "Spatial"))
+sezioni_civico.sf$SEZ2011 <- res$SEZ2011
+sezioni_civico.sf$unempl_pct <- 
+  res$unempl_pct
+sezioni_civico.sf$over65_pct <- 
+  res$over65_pct
+sezioni_civico.sf$degree_pct <- 
+  res$degree_pct
+sezioni_civico.sf$africa_pct <- 
+  res$africa_pct
+sezioni_civico.sf$asia_pct <- 
+  res$asia_pct
+
+res <-
+  as.data.frame(sezioni_civico.sf) %>%
+  group_by(Sezione = Sezione_num) %>%
+  summarize(unempl_pct = mean(unempl_pct, na.rm = T),
+            over65_pct = mean(over65_pct, na.rm = T),
+            degree_pct = mean(degree_pct, na.rm = T),
+            africa_pct = mean(africa_pct, na.rm = T),
+            asia_pct = mean(asia_pct, na.rm = T))
+
+sezioni_voti <-
+  merge(sezioni_voti, res, by = "Sezione")
+
+# Model
+sezioni_voti$m5s_pct <- sezioni_voti$MOVIMENTO.5.STELLE / sezioni_voti$Validi
+sezioni_voti$lega_pct <- sezioni_voti$LEGA.SALVINI.PREMIER / sezioni_voti$Validi
+sezioni_voti$pd_pct <- sezioni_voti$PARTITO.DEMOCRATICO / sezioni_voti$Validi
+sezioni_voti$fi_pct <- sezioni_voti$FORZA.ITALIA / sezioni_voti$Validi
+sezioni_voti$fdi_pct <- sezioni_voti$FRATELLI.D.ITALIA / sezioni_voti$Validi
+sezioni_voti$fn_pct <- sezioni_voti$FORZA.NUOVA / sezioni_voti$Validi
+sezioni_voti$pop_pct <- sezioni_voti$POPOLARI.PER.L.ITALIA / sezioni_voti$Validi
+sezioni_voti$eur_pct <- sezioni_voti$X.EUROPA...ITALIA.IN.COMUNE...P / sezioni_voti$Validi
+sezioni_voti$ls_pct <- sezioni_voti$LA.SINISTRA / sezioni_voti$Validi
+sezioni_voti$cp_pct <- sezioni_voti$CASAPOUND.ITALIA...DESTRE.UNIT / sezioni_voti$Validi
+
+sezioni_voti$lega_vs_pd <- 
+  sezioni_voti$LEGA.SALVINI.PREMIER / 
+  (sezioni_voti$PARTITO.DEMOCRATICO + sezioni_voti$LEGA.SALVINI.PREMIER)
+
+sezioni_voti$lega_vs_m5s <- 
+  sezioni_voti$LEGA.SALVINI.PREMIER / 
+  (sezioni_voti$MOVIMENTO.5.STELLE + sezioni_voti$LEGA.SALVINI.PREMIER)
+
+sezioni_voti$pd_vs_m5s <- 
+  sezioni_voti$PARTITO.DEMOCRATICO / 
+  (sezioni_voti$MOVIMENTO.5.STELLE + sezioni_voti$PARTITO.DEMOCRATICO)
+  
+
+sezioni_voti$turnout_pct <- sezioni_voti$Votanti / sezioni_voti$Elettori
+
+risultati_civico.sf <-
+  merge(sezioni_civico.sf, sezioni_voti[,c(1,35:48)],
+        by.x = "Sezione_num", by.y = "Sezione")
+
+risultati_sezione <- 
+  sezioni_civico %>%
+  group_by(Sezione_num) %>%
+  summarize(LONG_WGS84 = mean(LONG_WGS84, na.rm = T),
+            LAT_WGS84 = mean(LAT_WGS84, na.rm = T))
+
+risultati_sezione.sf <-
+  st_as_sf(risultati_sezione, 
+           coords = c("LONG_WGS84", "LAT_WGS84"), 
+           crs = 4326)
+
+risultati_sezione.sf <- merge(
+  risultati_sezione.sf, sezioni_voti,
+  by.x = "Sezione_num",
+  by.y = "Sezione"
+)
+```
+
+```{r prepare-housing}
+# Valori (source: ondata/quotazioni-immobiliari-agenzia-entrate)
+valori_milan.sf <-
+  read_sf("data/valori_shp/Provincia%20di%20MILANO%202018-2.kmz",
+          layer = "Comune di MILANO 2018-2")
+valori.df <-
+  read.csv('https://raw.githubusercontent.com/ondata/quotazioni-immobiliari-agenzia-entrate/master/data/QI_294577_1_20182_VALORI_utf8.csv')
+valori_milan.df  <-
+  valori.df %>%
+  filter(Comune_descrizione == 'MILANO' &
+           Descr_Tipologia == "Abitazioni civili") %>%
+  group_by(Zona) %>% 
+  summarize(Compr_min = mean(Compr_min))
+
+valori_milan.sf$zona_cln <-
+  str_extract(valori_milan.sf$Name, "[A-Z][0-9]{1,2}$")
+valori_milan.df$zona_cln <- valori_milan.df$Zona
+  
+valori_milan.sf <-
+  merge(valori_milan.sf, 
+        valori_milan.df, by = "zona_cln", all.x = T)
+
+res <- 
+  over(as(sezioni_civico.sf, "Spatial"),
+       as(valori_milan.sf %>% st_zm(), "Spatial"))
+res$Sezione_num <- sezioni_civico.sf$Sezione_num
+valore_sezione.df <-
+  res %>%
+  dplyr::group_by(Sezione_num) %>%
+  dplyr::summarize(Compr_min_median = median(Compr_min, na.rm = T))
+```
+
+```{r prepare-milan-infrastructure}
+# Limits
+limiti_milan.sf <- 
+  read_sf("data/limiti_shp/L090102_ComuneMilano.shp")
+
+# Nuclei
+nuclei_milan.sf <-
+  read_sf("data/nuclei_shp/NILZone_U00-32.shp")
+
+# Percorsi
+percorsi_milan.sf <-
+  read_sf("data/percorsi_shp/tpl_percorsi/tpl_percorsi.shp")
+```
+
+```{r prepare-osm}
+# OSM
+my_bbox.m <-
+  matrix(c(st_bbox(risultati_civico.sf)['xmin'], st_bbox(risultati_civico.sf)['xmin'],
+           st_bbox(risultati_civico.sf)['xmax'], st_bbox(risultati_civico.sf)['xmax'],
+           st_bbox(risultati_civico.sf)['xmin'], st_bbox(risultati_civico.sf)['ymax'],
+           st_bbox(risultati_civico.sf)['ymin'], st_bbox(risultati_civico.sf)['ymin'],
+           st_bbox(risultati_civico.sf)['ymax'], st_bbox(risultati_civico.sf)['ymax']),
+         ncol = 2)
+my_bbox.sf <-
+  st_geometry(st_polygon(x = list(my_bbox.m)))
+st_crs(my_bbox.sf) <-
+  4326
+my_bbox_buff_1000.sf <-
+  st_transform(my_bbox.sf, 32632) %>%
+  st_buffer(dist = 1000)
+my_bbox_buff_3000.sf <-
+  st_transform(my_bbox.sf, 32632) %>%
+  st_buffer(dist = 3000)
+
+quartooggiaro_box.m <-
+  matrix(c(st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['xmin'], 
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['xmin'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['xmax'], 
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['xmax'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['xmin'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['ymax'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['ymin'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['ymin'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['ymax'],
+           st_bbox(nuclei_milan.sf[nuclei_milan.sf$NIL == "QUARTO OGGIARO",])['ymax']),
+         ncol = 2)
+quartooggiaro_box.sf <-
+  st_geometry(st_polygon(x = list(quartooggiaro_box.m)))
+st_crs(quartooggiaro_box.sf) <-
+  6707
+quartooggiaro_buff_500.sf <-
+  quartooggiaro_box.sf %>%
+  st_buffer(dist = 500)
+
+osm_rivers.sf <- 
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>% 
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'waterway', value = 'river') %>%
+  osmdata_sf()
+osm_rivers.sf <- 
+  osm_rivers.sf$osm_lines
+
+osm_rails.sf <- 
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>% 
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'railway', value = 'rail') %>%
+  osmdata_sf()
+osm_rails.sf <- 
+  osm_rails.sf$osm_lines
+
+osm_motorway.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'motorway') %>%
+  osmdata_sf()
+osm_motorway.sf <-
+  osm_motorway.sf$osm_lines
+
+osm_motorway_link.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'motorway_link') %>%
+  osmdata_sf()
+osm_motorway_link.sf <-
+  osm_motorway_link.sf$osm_lines
+
+osm_trunk.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'trunk') %>%
+  osmdata_sf()
+osm_trunk.sf <-
+  osm_trunk.sf$osm_lines
+
+osm_trunk_link.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'trunk_link') %>%
+  osmdata_sf()
+osm_trunk_link.sf <-
+  osm_trunk_link.sf$osm_lines
+
+osm_primary.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'primary') %>%
+  osmdata_sf()
+osm_primary.sf <-
+  osm_primary.sf$osm_lines
+
+osm_secondary.sf <-
+  opq(bbox = st_bbox(my_bbox_buff_3000.sf %>%
+                       st_transform(4326))) %>%
+  add_osm_feature(key = 'highway', value = 'secondary') %>%
+  osmdata_sf()
+osm_secondary.sf <-
+  osm_secondary.sf$osm_lines
+```
+
+```{r ggplot-base-layers}
+# Base layers
+ggbase <-
+  list(geom_sf(data = osm_rivers.sf, 
+               alpha = .8, size = .1, colour = '#9ecae1'),
+         geom_sf(data = limiti_milan.sf, fill = NA),
+         geom_sf(data = percorsi_milan.sf %>% 
+                   filter(mezzo == "FILOBUS" & linea %in% c(90,91)),
+                 size = .2, linetype = "dashed"),
+         geom_sf(data = osm_motorway.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk.sf, 
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_motorway_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_primary.sf,
+                 colour = '#636363', size = 0.04),
+         geom_sf(data = osm_secondary.sf,
+                 colour = '#636363', size = 0.03),
+         theme_bw(), 
+         theme(axis.ticks = element_blank(), axis.text = element_blank(),
+               legend.position = c(.12,.12),
+               legend.background = element_rect(fill = "transparent")))
+
+ggcord_milan <- 
+  coord_sf(xlim = st_bbox(st_transform(my_bbox_buff_1000.sf, 4326))[c(1,3)],
+           ylim = st_bbox(st_transform(my_bbox_buff_1000.sf, 4326))[c(2,4)])
+
+ggbase_2 <-
+  list(geom_sf(data = osm_rivers.sf, 
+               alpha = .8, size = .1, colour = '#9ecae1'),
+       geom_sf(data = limiti_milan.sf, fill = NA),
+       geom_sf(data = percorsi_milan.sf %>% 
+                 filter(mezzo == "FILOBUS" & linea %in% c(90,91)),
+               size = .2, linetype = "dashed"),
+       geom_sf(data = osm_motorway.sf,
+               colour = '#636363', size = .055),
+       geom_sf(data = osm_trunk.sf, 
+               colour = '#636363', size = .055),
+       geom_sf(data = osm_motorway_link.sf,
+               colour = '#636363', size = .055),
+       geom_sf(data = osm_trunk_link.sf,
+               colour = '#636363', size = .055),
+       geom_sf(data = osm_primary.sf,
+               colour = '#636363', size = 0.04),
+       geom_sf(data = osm_secondary.sf,
+               colour = '#636363', size = 0.03),
+       theme_bw(), 
+       theme(axis.ticks = element_blank(), axis.text = element_blank(),
+             legend.position = "bottom",
+             legend.background = element_rect(fill = "transparent")))
+
+ggbase_3 <-
+  list(geom_sf(data = osm_rivers.sf, 
+               alpha = .8, size = .1, colour = '#9ecae1'),
+         geom_sf(data = limiti_milan.sf, fill = NA),
+         geom_sf(data = percorsi_milan.sf %>% 
+                   filter(mezzo == "FILOBUS" & linea %in% c(90,91)),
+                 size = .2, linetype = "dashed"),
+         geom_sf(data = osm_motorway.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk.sf, 
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_motorway_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_primary.sf,
+                 colour = '#636363', size = 0.04),
+         geom_sf(data = osm_secondary.sf,
+                 colour = '#636363', size = 0.03),
+         theme_bw(), 
+         theme(axis.ticks = element_blank(), axis.text = element_blank(),
+               legend.position = c(.14,.16),
+               legend.background = element_rect(fill = "transparent")))
+
+ggbase_4 <-
+  list(geom_sf(data = osm_rivers.sf, 
+               alpha = .8, size = .1, colour = '#9ecae1'),
+         geom_sf(data = limiti_milan.sf, fill = NA),
+         geom_sf(data = percorsi_milan.sf %>% 
+                   filter(mezzo == "FILOBUS" & linea %in% c(90,91)),
+                 size = .2, linetype = "dashed"),
+         geom_sf(data = osm_motorway.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk.sf, 
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_motorway_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_trunk_link.sf,
+                 colour = '#636363', size = .055),
+         geom_sf(data = osm_primary.sf,
+                 colour = '#636363', size = 0.04),
+         geom_sf(data = osm_secondary.sf,
+                 colour = '#636363', size = 0.03),
+         theme_bw(), 
+         theme(axis.ticks = element_blank(), axis.text = element_blank(),
+               legend.position = c(.16,.16),
+               legend.background = element_rect(fill = "transparent")))
+
+```
+
+```{r prepare-nucleo}
+res <- 
+  st_join(st_transform(risultati_civico.sf, 6707),
+          nuclei_milan.sf, 
+          join = st_within)
+tab <- 
+  as.data.frame(prop.table(table(res$Sezione_num, res$ID_NIL), 1))
+tab <- tab[tab$Freq > 0,]
+tab <-
+  merge(tab, sezioni_voti,
+        by.x = "Var1",
+        by.y = "Sezione")
+tab <-
+  tab %>%
+  group_by(ID_NIL = Var2) %>%
+  summarize(Elettori = sum(Elettori * Freq),
+            Votanti = sum(Votanti * Freq),
+            Validi = sum(Validi * Freq),
+            M5S = sum(MOVIMENTO.5.STELLE * Freq),
+            PD = sum(PARTITO.DEMOCRATICO * Freq),
+            Lega = sum(LEGA.SALVINI.PREMIER * Freq),
+            FI = sum(FORZA.ITALIA * Freq))
+
+nuclei_milan.sf <-
+  merge(nuclei_milan.sf, 
+        tab, 
+        by = "ID_NIL")
+
+nuclei_milan.sf <-
+  nuclei_milan.sf %>%
+  mutate(`M5S %` =  M5S / Validi,
+         `PD %` =  PD / Validi,
+         `Lega %` =  Lega / Validi,
+         `FI %` =  FI / Validi)
+
+nuclei_milan.sf <- st_transform(nuclei_milan.sf, 4326)
+```
+
+# La distribuzione dei voti in città
+
+La geografia socio-politica delle grandi città italiane del centro-nord è radicalmente cambiata negli ultimi 25 anni. Se osserviamo la distribuzione dei voti a Milano tra i partiti alle elezioni europee del 1994, tenutesi pochi mesi dopo la straordinaria vittoria elettorale di Silvio Berlusconi nel Marzo dello stesso anno in cui Forza Italia ottenne il 21% e il Polo delle Libertà più quasi il 43%), vediamo un chiaro spostameno da destra verso il centro-sinistra e il PD. 
+
+```{r milano_1994_2019, out.width = "80%", fig.width = 8, fig.cap = "Voti assegnati ai partiti nelle elezioni europee del 1994 e 2019."}
+milano_1994_2019 <- 
+  read_excel("data/milano_1994_2019.xlsx")
+milano_1994_2019$year[milano_1994_2019$year == 2018] <- 2019
+milano_1994_2019$pos <- 
+  factor(milano_1994_2019$pos, 
+         levels = c("Right", "Centre-right", "Centre", "?", "Centre-left", "Left"))
+levels(milano_1994_2019$pos) <- 
+  c("destra", "centro\ndestra", "centro", "?", "centro\nsinistra", "sinistra")
+milano_1994_2019 <-
+  milano_1994_2019[order(milano_1994_2019$pos),]
+
+milano_1994_2019$label <- NA
+milano_1994_2019$label[milano_1994_2019$party == "LEGA NORD"] <- 
+  "Lega"
+milano_1994_2019$label[milano_1994_2019$party == "ALLEANZA NAZIONALE"] <- "AN"
+milano_1994_2019$label[milano_1994_2019$party == "LEGA SALVINI PREMIER"] <- "Lega"
+milano_1994_2019$label[milano_1994_2019$party == "FORZA ITALIA"] <- "FI"
+milano_1994_2019$label[milano_1994_2019$party == "P.POPOLARE ITALIANO"] <- "PPI"
+milano_1994_2019$label[milano_1994_2019$party == "PARTITO DEMOCRATICO"] <- "PD"
+milano_1994_2019$label[milano_1994_2019$party == "MOVIMENTO 5 STELLE"] <- "M5S"
+milano_1994_2019$label[milano_1994_2019$party == "PDS"] <- "PDS"
+
+milano_1994_2019$pct <- milano_1994_2019$pct/100
+
+milano_1994_2019$party_factor <- 
+  milano_1994_2019$party
+milano_1994_2019$party_factor[milano_1994_2019$party == "FORZA ITALIA" &
+                         milano_1994_2019$year == 2019] <- "FORZA ITALIA 2"
+milano_1994_2019$party_factor <-
+  factor(milano_1994_2019$party_factor,
+         levels = milano_1994_2019$party_factor[order(milano_1994_2019$pos)])
+
+my_cols <- 
+  c(rep("#2166ac", 8),
+    rep("#92c5de", 5),
+    rep("#f7f7f7", 5),
+    rep("yellow", 1),
+    rep("#d6604d", 6),
+    rep("#b2182b", 8))
+names(my_cols) <- 
+  milano_1994_2019$party_factor
+
+myPercent <- function(x) {
+  paste0(round(x*100, 0), "%")
+}
+
+# ggplot(milano_1994_2019, aes(x=pos,y=pct,fill=party)) +
+#   geom_bar(stat = 'identity',colour='black') + 
+#   scale_y_continuous(label = myPercent) +
+#   facet_grid(.~year) +
+#   guides(fill = FALSE) +
+#   scale_fill_manual(values = my_cols) +
+#   theme_bw() + labs(x=NULL,y=NULL) +
+#   geom_label(aes(label = label),position = position_stack(vjust = 0.6), fill = "white")
+
+library(ggrepel)
+ggplot(milano_1994_2019, aes(x=as.factor(year), y=pct, fill=party_factor, label=label)) +
+  geom_bar(stat = 'identity',colour='black', size = .1) + 
+  geom_label(position = position_stack(vjust = .5)) +
+  scale_y_continuous(label = myPercent) +
+  scale_fill_manual(values = my_cols, guide="none") +
+  theme_bw() + labs(x=NULL,y=NULL) + 
+  geom_hline(yintercept = .5, colour = "red", linetype = "dashed")
+
+```
+
+Dalla figura notiamo che se nel 1994 il voto complessivo di destra e centro-destra era intorno al `r round(sum(milano_1994_2019$pct[milano_1994_2019$year == 1994 & milano_1994_2019$pos %in% c("destra", "centro\ndestra")])*100, 0)`%, nel 2018 il voto della stessa area si attesta intorno al `r round(sum(milano_1994_2019$pct[milano_1994_2019$year == 2019 & milano_1994_2019$pos %in% c("destra", "centro\ndestra")])*100, 0)`%. La differenza di più di 20 punti percentuali è largamente dovuta alla crescita del PD all'interno di un centro-sinistra che governa il Comune di Milano dal 2011, anno in cui Giuseppe Pisapia vince su Letizia Moratti e su un centro-destra che aveva governato la cittá ininterrottamente dal 1993. 
+
+## Cosa è successo?
+
+```{r}
+dati_cpa_1991_R03_DatiCPA_1991 <- 
+  read_excel("data/dati-cpa_1991\\R03_DatiCPA_1991.xls")
+dati_cpa_2001_R03_DatiCPA_2001 <- 
+  read_excel("data/dati-cpa_2001\\R03_DatiCPA_2001.xls")
+
+census_sections_1991.sf <- 
+  read_sf('data/census_shp/R03_91_WGS84.shp')
+census_sections_1991.sf <-
+  census_sections_1991.sf[census_sections_1991.sf$PRO_COM == 15146,] 
+
+census_sections_1991.sf <-
+  merge(census_sections_1991.sf, dati_cpa_1991_R03_DatiCPA_1991,
+        by = 'SEZ1991', all.x = TRUE)
+
+census_sections_1991.sf$unempl_pct <- 
+  census_sections_1991.sf$P62 / census_sections_1991.sf$P60
+
+census_sections_1991.sf$over65_pct <- 
+  with(census_sections_1991.sf, (P27 + P28 + P29) / P1)
+
+census_sections_1991.sf$degree_pct <- 
+  with(census_sections_1991.sf, (P47) / P1)
+
+census_sections_2001.sf <- 
+  read_sf('data/census_shp/R03_01_WGS84.shp')
+census_sections_2001.sf <-
+  census_sections_2001.sf[census_sections_2001.sf$PRO_COM == 15146,] 
+
+census_sections_2001.sf <-
+  merge(census_sections_2001.sf, dati_cpa_2001_R03_DatiCPA_2001,
+        by = 'SEZ2001', all.x = TRUE)
+
+census_sections_2001.sf$unempl_pct <- 
+  census_sections_2001.sf$P62 / census_sections_2001.sf$P60
+
+census_sections_2001.sf$over65_pct <- 
+  with(census_sections_2001.sf, (P27 + P28 + P29) / P1)
+
+census_sections_2001.sf$degree_pct <- 
+  with(census_sections_2001.sf, (P47) / P1)
+```
+
+La demografia della città è profondamente cambiata in seguito alla trasformazione del fronte occupazionale. L’indicatore probabilmente più efficacie per descrivere questo cambiamento è il numero di laureati, sia in termini assoluti che in termini percentuali. I residenti a Milano con una laurea erano il `r round(with(dati_cpa_1991_R03_DatiCPA_1991, sum(P47[PRO_COM == 15146]) / sum(P1[PRO_COM == 15146]))*100,0)`% (`r format(with(dati_cpa_1991_R03_DatiCPA_1991, sum(P47[PRO_COM == 15146])), big.mark = ".")`) nel 1991, il `r round(with(dati_cpa_2001_R03_DatiCPA_2001, sum(P47[PRO_COM == 15146]) / sum(P1[PRO_COM == 15146]))*100,0)`% (`r format(with(dati_cpa_2001_R03_DatiCPA_2001, sum(P47[PRO_COM == 15146])), , big.mark = ".")`) nel 2011 e il `r round(with(R03_indicatori_2011_sezioni, sum(P47[PROCOM == 15146]) / sum(P1[PROCOM == 15146]))*100,0)`% (`r format(with(R03_indicatori_2011_sezioni, sum(P47[PROCOM == 15146])), big.mark = ".")`) nel 2011. La crescita dei laureati a Milano è ancora più significativa se si paragona a quanto successo nel resto d’Italia, dove la percentuale di laureati nel 2011 era inferiore alla percentuale di laureati a Milano vent'anni prima.
+
+```{r degree_over65, fig.cap = "Percentuale di residenti laureati a Milano e nel resto d Italia econdo i dati censimentari."}
+dat_degree_over65 <- 
+  data.frame(
+    year = rep(c(1991, 1991, 2001, 2001, 2011, 2011), 2),
+    where = rep(rep(c("Milano", "resto d'Italia"), 3), 2),
+    what = c(rep("Laureati", 6), 
+             rep("Over 65", 6)),
+    value = 
+      c(with(dati_cpa_1991_R03_DatiCPA_1991, sum(P47[PRO_COM == 15146]) / 
+               sum(P1[PRO_COM == 15146])),
+        with(dati_cpa_1991_R03_DatiCPA_1991, sum(P47[PRO_COM != 15146]) / 
+               sum(P1[PRO_COM != 15146])),
+        with(dati_cpa_2001_R03_DatiCPA_2001, sum(P47[PRO_COM == 15146]) / 
+               sum(P1[PRO_COM == 15146])),
+        with(dati_cpa_2001_R03_DatiCPA_2001, sum(P47[PRO_COM != 15146]) / 
+               sum(P1[PRO_COM != 15146])),
+        with(R03_indicatori_2011_sezioni, sum(P47[PROCOM == 15146]) / 
+               sum(P1[PROCOM == 15146])),
+        with(R03_indicatori_2011_sezioni, sum(P47[PROCOM != 15146]) / 
+               sum(P1[PROCOM != 15146])),
+        with(dati_cpa_1991_R03_DatiCPA_1991, sum(P27[PRO_COM == 15146] +
+                                                   P28[PRO_COM == 15146] +
+                                                   P29[PRO_COM == 15146]) / 
+               sum(P1[PRO_COM == 15146])),
+        with(dati_cpa_1991_R03_DatiCPA_1991, sum(P27[PRO_COM != 15146] +
+                                                   P28[PRO_COM != 15146] +
+                                                   P29[PRO_COM != 15146]) / 
+               sum(P1[PRO_COM != 15146])),
+        with(dati_cpa_2001_R03_DatiCPA_2001, sum(P27[PRO_COM == 15146] +
+                                                   P28[PRO_COM == 15146] +
+                                                   P29[PRO_COM == 15146]) / 
+               sum(P1[PRO_COM == 15146])),
+        with(dati_cpa_2001_R03_DatiCPA_2001, sum(P27[PRO_COM != 15146] +
+                                                   P28[PRO_COM != 15146] +
+                                                   P29[PRO_COM != 15146]) / 
+               sum(P1[PRO_COM != 15146])),
+        with(R03_indicatori_2011_sezioni, sum(P27[PROCOM == 15146] +
+                                                   P28[PROCOM == 15146] +
+                                                   P29[PROCOM == 15146]) / 
+               sum(P1[PROCOM == 15146])),
+        with(R03_indicatori_2011_sezioni, sum(P27[PROCOM != 15146] +
+                                                   P28[PROCOM != 15146] +
+                                                   P29[PROCOM != 15146]) / 
+               sum(P1[PROCOM != 15146])))
+  )
+
+ggplot(dat_degree_over65 %>% filter(what=='Laureati'), aes(x=year, linetype=where, y=value)) +
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(label = myPercent) +
+  theme_bw() +
+  scale_colour_brewer(palette = "Set1") + 
+  labs(x=NULL,y=NULL,colour=NULL,linetype=NULL)
+```
+
+Come si nota dalle tre figure seguenti questo cambiamento è stato più intenso nei quartieri centrali della città ma non si è limitato al centro. Anche i quartieri di Milano all'esterno dalla Circonvallazione esterna (indicata nella mappa) che corrisponde alle linee dei filobus 90 e 91 hanno visto una crescita significativa nel numero dei laureati. 
+
+```{r degree_over65_census, fig.width = 12, fig.cap = "Percentuale di laureati tra la popolazione residente secondo i dati censimentari per sezione di censimento."}
+census_sections_2011.sf <- census_sections.sf
+census_sections_1991.sf$degree_pct[is.na(census_sections_1991.sf$degree_pct)] <- 0
+census_sections_2001.sf$degree_pct[is.na(census_sections_2001.sf$degree_pct)] <- 0
+census_sections_2011.sf$degree_pct[is.na(census_sections_2011.sf$degree_pct)] <- 0
+
+census_sections_1991.sf$over65_pct[is.na(census_sections_1991.sf$over65_pct)] <- 0
+census_sections_2001.sf$over65_pct[is.na(census_sections_2001.sf$over65_pct)] <- 0
+census_sections_2011.sf$over65_pct[is.na(census_sections_2011.sf$over65_pct)] <- 0
+
+grid.arrange(
+  ggplot(st_transform(census_sections_1991.sf, 4326)) + 
+    geom_sf(aes(fill = degree_pct), colour = NA) + 
+    scale_fill_distiller(palette = 'Spectral', direction = -1, label = percent) +
+    labs(fill = NULL) +
+    ggbase_2 + ggcord_milan + labs(title = "1991"),
+  ggplot(st_transform(census_sections_2001.sf, 4326)) + 
+    geom_sf(aes(fill = degree_pct), colour = NA) + 
+    scale_fill_distiller(palette = 'Spectral', direction = -1, label = percent) +
+    labs(fill = NULL) +
+    ggbase_2 + ggcord_milan + labs(title = "2001"),
+  ggplot(st_transform(census_sections_2011.sf, 4326)) + 
+    geom_sf(aes(fill = degree_pct), colour = NA) + 
+    scale_fill_distiller(palette = 'Spectral', direction = -1, label = percent) +
+    labs(fill = NULL) +
+    ggbase_2 + ggcord_milan + labs(title = "2011"),
+  ncol = 3)
+```
+
+Il numero di laureati a Milano è aumentato, ma così anche il numero dei laureati *occupati* e occupati in lavori ben remunerati. Il tasso di disoccupazione di Milano è infatti compatibile con un regime di piena occupazione e la forte crescita del numero dei laureati è anche dovuta a una immigrazione interna qualificata.
+
+## La distribuzione dei voti per numero civico
+
+Dopo questa premessa demografica, vediamo ora la distribuzione dei voti per le elezioni europee 2019 nel Comune di Milano. Nella figura seguente si può apprezzare il rapporto tra i voti ricevuti dalla Lega e dal Partito Democratico (PD) se escludiamo i voti dati agli altri parti. I voti ai due partiti sono stimati per 47.510 numeri civici. In questo senso, ogni puntino corrisponde ad un numero civico e la stima dei voti è effettuata in base ai voti ricevuti nella sezione elettorale del numero civico. Una stima, appunto, visto che il voto è giustamente segreto. 
+
+```{r Lega_vs_PD, fig.cap="Distribuzione del voto per le europee 2019 tra Lega e PD a livello di numero civico", out.width = "80%"}
+ggplot(risultati_civico.sf) + 
+  geom_sf(aes(colour = lega_vs_pd), size = .07) + 
+  scale_color_distiller(palette = 'RdYlBu', direction = -1,
+                        limits = c(0,1), 
+                        labels = c("Lega 0% : PD 100%",
+                                   "",
+                                   "Lega 50% : PD 50%",
+                                   "",
+                                   "Lega 100% : PD 0%")) +
+  labs(color = "Solo voti a Lega o PD") +
+  ggbase_3 + ggcord_milan
+```
+
+L’importanza della geografia è chiaramente visibile. Il PD, con poche eccezioni, è maggioritario all’interno della Circonvallazione esterna mentre la Lega si rafforza più ci avvicina ai limiti del territorio comunale. 
+
+## La distribuzione dei voti per nucleo d'identità locale  
+
+Se invece dei numeri civici usiamo i Nucleo d'identità locale (NIL) come unità geografica per l’aggregazione dei voti, la differenza centro-periferia è ancora più evidente. 
+
+```{r nuclei_voti_pct, fig.width = 12, fig.height = 8, fig.cap = "Distribuzione del voto per le europee 2019 per PD, Lega, FI e M5S a livello di nucleo d'identità locale."}
+myPercent <- function(x) {
+  round(x*100, 0)
+}
+
+grid.arrange(
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = PD), size = .05) + 
+    scale_fill_distiller(palette = "YlOrRd", 
+                         direction = 1,
+                         limits = c(0, 13400)) +
+    ggbase_2 + 
+    ggcord_milan +
+    labs(title = "PD", fill = "Voti"),
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = Lega), size = .05) + 
+    scale_fill_distiller(palette = "YlGn", 
+                         direction = 1,
+                         limits = c(0, 13400)) +
+    ggbase_2 + 
+    ggcord_milan +
+    labs(title = "Lega", fill = "Voti"),
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = FI), size = .05) + 
+    scale_fill_distiller(palette = "YlGnBu", 
+                         direction = 1,
+                         limits = c(0, 13400)) +
+    ggbase_2 + 
+    ggcord_milan +
+    labs(title = "FI", fill = "Voti"),
+ggplot() +
+  geom_sf(data = nuclei_milan.sf, aes(fill = M5S), size = .05) + 
+  scale_fill_distiller(palette = "RdPu", 
+                       direction = 1,
+                       limits = c(0, 13400)) +
+  ggbase_2 + 
+  ggcord_milan +
+  labs(title = "M5S", fill = "Voti"),
+ggplot() +
+  geom_sf(data = nuclei_milan.sf, aes(fill = `PD %`), size = .05) + 
+  scale_fill_distiller(palette = "YlOrRd", 
+                       direction = 1,
+                       labels = myPercent) +
+  ggbase_2 + 
+  ggcord_milan +
+  labs(fill = "Voti %"),
+ggplot() +
+  geom_sf(data = nuclei_milan.sf, aes(fill = `Lega %`), size = .05) + 
+  scale_fill_distiller(palette = "YlGn", 
+                       direction = 1,
+                       labels = myPercent) +
+  ggbase_2 + 
+  ggcord_milan +
+  labs(fill = "Voti %"),
+ggplot() +
+  geom_sf(data = nuclei_milan.sf, aes(fill = `FI %`), size = .05) + 
+  scale_fill_distiller(palette = "YlGnBu", 
+                       direction = 1,
+                       labels = myPercent) +
+  ggbase_2 + 
+  ggcord_milan +
+  labs(fill = "Voti %"),
+ggplot() +
+  geom_sf(data = nuclei_milan.sf, aes(fill = `M5S %`), size = .05) + 
+  scale_fill_distiller(palette = "RdPu", 
+                       direction = 1,
+                       labels = myPercent) +
+  ggbase_2 + 
+  ggcord_milan +
+  labs(fill = "Voti %"),
+ncol = 4)
+```
+
+Osservando la distribuzione dei voti al terzo e quarto partito più votato, notiamo una certa corrispondenza tra la geografia del voto di Forza Italia (FI) col voto del PD e tra il voto alla Lega e quello al Movimento 5 Stelle (M5S). A Milano, la Lega e il M5S sono più radicati nelle periferie, mentre PD e FI sono radicati nei quartieri centrali. 
+
+```{r nuclei_voti_vs, fig.width = 12, fig.height = 10, fig.cap = "Distribuzione del voto per le europee 2019 a livello di nucleo d'identità locale."}
+
+nuclei_milan.sf <-
+  nuclei_milan.sf %>%
+  mutate(lega_vs_pd = Lega / (Lega + PD),
+         lega_vs_m5s = Lega / (Lega + M5S),
+         pd_vs_m5s = PD / (PD + M5S),
+         lega_vs_fi = Lega / (Lega + FI),
+         pd_vs_fi = PD / (PD + FI))
+  
+grid.arrange(
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = lega_vs_pd), size = .05) + 
+    scale_fill_distiller(palette = 'RdBu', direction = -1,
+                         limits = c(.25,.75), 
+                         labels = c("Lega 25% : PD 75%",
+                                    "",
+                                    "Lega 50% : PD 50%",
+                                    "",
+                                    "Lega 75% : PD 25%")) +
+    ggbase_3 + 
+    ggcord_milan +
+    labs(fill = NULL),
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = pd_vs_m5s), size = .05) + 
+    scale_fill_distiller(palette = 'RdBu', direction = 1,
+                         limits = c(0,1), 
+                         labels = c("PD 0% : M5S 100%",
+                                    "",
+                                    "PD 50% : M5S 50%",
+                                    "",
+                                    "PD 100% : M5S 0%")
+    ) +
+    ggbase_3 + 
+    ggcord_milan +
+    labs(fill = NULL),
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = lega_vs_fi), size = .05) + 
+    scale_fill_distiller(palette = 'RdBu', direction = -1,
+                         limits = c(0,1), 
+                         labels = c("Lega 0% : FI 100%",
+                                    "",
+                                    "Lega 50% : FI 50%",
+                                    "",
+                                    "Lega 100% : FI 0%")
+    ) +
+    ggbase_3 + 
+    ggcord_milan +
+    labs(fill = NULL),
+  ggplot() +
+    geom_sf(data = nuclei_milan.sf, aes(fill = pd_vs_fi), size = .05) + 
+    scale_fill_distiller(palette = 'RdBu', direction = 1,
+                         limits = c(0,1), 
+                         labels = c("PD 0% : FI 100%",
+                                    "",
+                                    "PD 50% : FI 50%",
+                                    "",
+                                    "PD 100% : FI 0%")
+    ) +
+    ggbase_3 + 
+    ggcord_milan +
+    labs(fill = NULL),
+  ncol = 2
+)
+```
+
+Le tabelle seguenti confrontano i risultati di PD e Lega in 20 nei NIL in cui il sostegno elettorale per i due partiti è più forte. Due le cose da notare: primo, nei nuclei all’interno della Circonvallazione esterna, il vantaggio del PD è molto più forte di quanto non sia il vantaggio della Lega in periferia e, secondo, i nuclei dove la Lega è più forte sono molto meno popolati. In questo senso, una spartizione del supporto sull’asse centro-periferia non corrisponde a una parità del bacino elettorale: in termini aggregati, nel Comune di Milano, il PD può contare su molti più elettori. 
+
+```{r}
+nuclei_milan.df <- as.data.frame(nuclei_milan.sf)
+kable(nuclei_milan.df %>%
+        mutate(`Voti PD` = round(PD, 0), `PD %` = round(`PD %` * 100, 1),
+               `Voti Lega` = round(Lega, 0), `Lega %` = round(`Lega %` * 100, 1),
+               `differenza pp` = `PD %` - `Lega %`) %>%
+        select(nucleo = NIL, `Voti PD`, `PD %`, `Voti Lega`, `Lega %`, `differenza pp`) %>%
+        arrange(desc(`PD %`)) %>%
+        head(n = 10))
+
+library(knitr)
+nuclei_milan.df <- as.data.frame(nuclei_milan.sf)
+kable(nuclei_milan.df %>%
+        mutate(`Voti PD` = round(PD, 0), `PD %` = round(`PD %` * 100, 1),
+               `Voti Lega` = round(Lega, 0), `Lega %` = round(`Lega %` * 100, 1),
+               `differenza pp` =  `Lega %` - `PD %`) %>%
+        select(nucleo = NIL, `Voti PD`, `PD %`, `Voti Lega`, `Lega %`, `differenza pp`) %>%
+        arrange(desc(`Lega %`)) %>%
+        head(n = 10))
+```
+
+# Correlazioni e interazioni tra variabili demografiche e il voto
+
+Per interpretare il significato del voto, possiamo incrociare i risultati nelle sezioni elettorali con valore immobiliari medi riportatati dall’Agenzia delle Entrate per il 2018 e con variabili demografiche calcolate sulla base degli ultimi dati censimentari raccolti nel 2011 nelle 6085 sezioni all’interno del Comune di Milano. 
+
+La figura successiva illustra la differenza tra il valore atteso nei quartieri centrali e in quelli periferici. La differenza centro-periferia è indubbiamente molto forte: il valore medio varia fino a quattro volte. 
+
+```{r valori_abitazioni, out.width = "80%", fig.cap="Volore medio minimo per metro quadro di abitazioni in compravendita calcolato in 41 zone di Milano sulla base di dati curati dall'Agenzia delle Entrate."}
+ggplot() + 
+         ggbase_4 + 
+         geom_sf(data = valori_milan.sf, 
+                 aes(fill = Compr_min), colour = NA, alpha = .75) +
+         scale_fill_distiller(palette = "Spectral", na.value = "white", direction = 1,
+                              labels = dollar_format(suffix = "€", prefix = "")) +
+         labs(fill = "Valori case (minimo per m²)") +
+         ggcord_milan 
+```
+
+La correlazione tra voto alla Lega e valore delle abitazioni esiste ma non è pienamente lineare. Nella figura successiva si vede come il voto leghista cresca molto quando il valore diminuisce al di sotto di circa 2.760 euro al metro quadro.  
+
+```{r out.width = "80%", fig.cap="Voto alla Lega e valore atteso di un'abitazione a Milano."}
+risultati_sezione.sf <-
+  merge(risultati_sezione.sf, valore_sezione.df,
+        by = "Sezione_num")
+myseq = seq(from = 1775, to = 8150, length.out = 40)
+risultati_sezione.sf$Compr_min_median_cut <-
+  cut(risultati_sezione.sf$Compr_min_median, breaks = myseq, 
+      labels = myseq[1:39], include.lowest = TRUE)
+risultati_sezione.sf$Compr_min_median_cut <-
+  round(as.numeric(as.character(risultati_sezione.sf$Compr_min_median_cut))/1000,2)
+
+
+mod_lega_vs_pd1 <- 
+  lm(lega_vs_pd ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct +
+       Compr_min_median,  
+     data = risultati_sezione.sf)
+mod_lega_vs_pd2 <- 
+  lm(lega_vs_pd ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)  
+
+mod_lega1 <- 
+  lm(lega_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct +
+       Compr_min_median,  
+     data = risultati_sezione.sf)
+mod_lega2 <- 
+  lm(lega_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+
+mod_pd1 <- 
+  lm(pd_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+mod_pd2 <- 
+  lm(pd_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+
+mod_m5s1 <- 
+  lm(m5s_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+mod_m5s2 <- 
+  lm(m5s_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+
+mod_fi1 <- 
+  lm(fi_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+mod_fi2 <- 
+  lm(fi_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+
+mod_cp1 <- 
+  lm(cp_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+mod_cp2 <- 
+  lm(cp_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+
+mod_fn1 <- 
+  lm(fn_pct ~ unempl_pct + degree_pct + over65_pct + africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+mod_fn2 <- 
+  lm(fn_pct ~ unempl_pct + degree_pct + over65_pct * africa_pct  + asia_pct,  
+     data = risultati_sezione.sf)
+```
+
+In realtà la distribuzione geografica del valore delle abitazioni non è totalmente soddisfacente come variabile indipendente (quindi per *predire* il voto ai partiti). È evidente infatti che le abitazioni non votano; a votare è chi ci abita. In questo senso, il valore immobiliare potrebbe essere efficace solo nel caso non fossero disponibili altre variabili demografiche che meglio possono descrivere la relazione tra elettori e partiti. In termini più tecnici, il valore immobiliare è determinato dai tratti demografici di chi ci abita esattamente come il voto: quindi anche se voto e valore immobiliare fossero correlati, sarebbe difficile ipotizzare un rapporto di cause-effetto. 
+
+```{r, fig.cap = "Associazione del voto alla Lega alle europee 2019 e il valore delle abitazioni"}
+ggplot(risultati_sezione.sf %>% filter(!is.na(Compr_min_median_cut)), 
+       aes(x = as.factor(Compr_min_median_cut), y = lega_pct)) +
+  geom_boxplot() +
+  scale_x_discrete() +
+  scale_y_continuous(labels = myPercent) +
+  labs(y = "Lega", x = "Valore casa (1.000€/m²)") +
+  theme_bw()
+```
+
+La tabella seguente riporta i risultati di alcuni modelli statistici usati per stimare l’impatto sul voto di alcune variabili demografiche e del valore immobiliare. Da notare è l’uso di un termine di interazione tra i residenti non italiani e con un passaporto di un paese africano e il numero di residenti sopra il 65 anni. L’interazione è giustificata da una semplice ipotesi, in un contesto urbano, una compresenza di popolazione anziana e straniera potrebbe identificare aree a più alto disagio sociale e a più forte competizione per i servizi assistenziali (in particolare le case popolari), un disagio su cui la Lega e i partiti di destra ed estrema destra hanno sempre cercato di capitalizzare elettoralmente. 
+
+```{r, results='asis'}
+library(stargazer)
+stargazer(mod_lega_vs_pd1, mod_lega_vs_pd2, 
+          mod_lega1, mod_lega2,
+          mod_pd1, mod_pd2,
+          mod_fi1, mod_fi2,
+          mod_m5s1, mod_m5s2, 
+          p = list(summary(mod_lega_vs_pd1)$coefficients[,4],
+                   summary(mod_lega_vs_pd2)$coefficients[,4],
+                   summary(mod_lega1)$coefficients[,4],
+                   summary(mod_lega2)$coefficients[,4],
+                   summary(mod_pd1)$coefficients[,4],
+                   summary(mod_pd2)$coefficients[,4],
+                   summary(mod_fi1)$coefficients[,4],
+                   summary(mod_fi2)$coefficients[,4],
+                   summary(mod_m5s1)$coefficients[,4],
+                   summary(mod_m5s2)$coefficients[,4]),
+          coef = 
+            list(lm.beta(mod_lega_vs_pd1)$standardized.coefficients,
+                 lm.beta(mod_lega_vs_pd2)$standardized.coefficients,
+                 lm.beta(mod_lega1)$standardized.coefficients,
+                 lm.beta(mod_lega2)$standardized.coefficients,
+                 lm.beta(mod_pd1)$standardized.coefficients,
+                 lm.beta(mod_pd2)$standardized.coefficients,
+                 lm.beta(mod_fi1)$standardized.coefficients,
+                 lm.beta(mod_fi2)$standardized.coefficients,
+                 lm.beta(mod_m5s1)$standardized.coefficients,
+                 lm.beta(mod_m5s2)$standardized.coefficients),
+          omit.stat = c("f","ser"),
+          omit = c("Constant"),
+          report = "vc*",
+          type = "html",
+          dep.var.labels = c("Lega vs PD %", "Lega %", "PD %", "FI %", "M5S %"),
+          covariate.labels = c("Disoccupati %",
+                               "Laureati %",
+                               "Over 65 %",
+                               "Africani %",
+                               "Asiatici %",
+                               "Valore medio casa m2",
+                               "Over 65 X Africani"))
+```
+
+I coefficienti standardizzati confermano una forte associazione tra la presenza di laureati e il voto al PD e in misura minora anche a FI. Nel modello (1), che predice la forza relativa della Lega contro il PD, il numero di laureati è di gran lunga il predittore con l’effetto più forte seguito dal numero di cittadini africani mentre le altre variabili non dimostrano aver un effetto importante. Da notare tuttavia che nel modello (2) il termine di interazione tra cittadini africani e residenti anziani è stimato avere un effetto relativamente importante. In termini più discorsivi, il PD è relativamente più forte nell’area con molti laureati mentre la Lega guadagna consensi nelle situazioni periferiche più disagiate caratterizzate sia da una forte presenza di cittadini africani che di cittadini anziani; ne la presenza di immigrati o di anziani è di per sé  sufficiente a far crescere il consenso della Lega. 
+
+# Conclusione: Cosa significa a livello nazionale
+
+La notevole differenza di voti tra il PD e la Lega a Milano non è necessariamente una buona notizia per il PD. Il modello Milano non è facilmente esportabile nel resto d’Italia. Con la significativa eccezione delle grandi metropoli del nord e forse di Roma, la composizione demografica del resto d’Italia, includendo anche le grandi città centro-meridionali, è molto diversa da Milano. I risultati di Milano delineano un forte legame tra la parte di elettorato con un titolo di laurea (ma anche un lavoro ben retribuito) e il PD. Il problema per il PD è che quella parte di elettorato è una minoranza; intellettualmente significativa, ma elettoralmente destinata a restare minoritaria per decenni. La percentuale di laureati in Italia è di meno del 20%. A questo si aggiunge che non sempre una laurea si traduce in un lavoro interessante e ben retribuito e, in fatti, è molto probabile che nel sud Italia il M5S abbia capitalizzato sulla frustrazione di laureati mal-occupati. 
+
+La situazione di Milano è semmai preoccupante in quanto individua un chiaro solco (cleavage) tra una parta della popolazione ben istruita e ben impiegata da un lato e le periferie economiche dall’altro. La preoccupazione nasce dal fatto che la convenienza elettorale di quel solco, che è conveniente sia alla Lega che in un certo qual modo al PD, rende la sua risoluzione meno probabile soprattutto in un contesto di forte contrapposizione politica.  
+
+```{r}
+library(leaflet) 
+library(RColorBrewer)
+myPal <- 
+  colorNumeric(
+    palette = "RdBu",
+    domain = c(0,1), 
+    reverse = TRUE)
+
+nuclei_milan.sf$popup <- 
+  sprintf("<b>%s</b><br><br>PD: %s (%s pct)<br>Lega: %s (%s pct)<br>FI: %s (%s pct)<br>M5S: %s (%s pct)<br>Elettori: %s",
+          nuclei_milan.sf$NIL, 
+          round(nuclei_milan.sf$PD,0), 
+          round(nuclei_milan.sf$`PD %`*100,0),
+          round(nuclei_milan.sf$Lega,0), 
+          round(nuclei_milan.sf$`Lega %`*100,0),
+          round(nuclei_milan.sf$FI,0), 
+          round(nuclei_milan.sf$`FI %`*100,0),
+          round(nuclei_milan.sf$M5S,0), 
+          round(nuclei_milan.sf$`M5S %`*100,0),
+          round(nuclei_milan.sf$Votanti,0)
+          )
+  
+leaflet(nuclei_milan.sf) %>%
+  addProviderTiles(providers$Stamen.TonerLite) %>%
+  addPolygons(stroke = TRUE, smoothFactor = 0.2, fillOpacity = .8,
+              fillColor = ~myPal(lega_vs_pd), color = 'black', weight = 1,
+              popup = ~popup) %>%
+   addLegend("bottomleft", pal = myPal, values = c(0,1),
+    title = "Perc. voti Lega su voti a Lega e PD",
+    labFormat = percent,
+    opacity = 1
+  )
+  
+  
+```
+
